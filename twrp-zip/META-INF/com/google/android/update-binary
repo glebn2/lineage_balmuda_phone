@@ -1,0 +1,254 @@
+#!/sbin/sh
+# LineageOS installer for BALMUDA Phone (TWRP). Writes the active slot: logical partitions in super,
+# boot, dtbo, vbmeta and vbmeta_system. Data is kept when LineageOS is already installed, otherwise wiped.
+# Arguments: $1 API version, $2 console fd, $3 zip path.
+
+OUTFD=$2
+ZIP=$3
+W=/tmp/lineage-install
+
+ui_print() {
+  echo "ui_print $*" >> /proc/self/fd/$OUTFD
+  echo "ui_print" >> /proc/self/fd/$OUTFD
+}
+abort() {
+  ui_print " "
+  ui_print "СТОП: $*"
+  exit 1
+}
+# Failure after writing started: the system will not boot, TWRP is intact.
+fail_after_write() {
+  ui_print " "
+  ui_print "ОШИБКА: $*"
+  ui_print "Запись прервана. TWRP не тронут: установите этот zip ещё раз"
+  ui_print "(или zip отката на штатную прошивку)."
+  exit 1
+}
+# TWRP sh (mksh) arithmetic is 32-bit while sizes exceed 2^31: sums and comparisons go through awk
+ge() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 >= b + 0) }'; }
+# Stream all chunks of an image to stdout
+stream() {
+  i=0
+  while [ $i -lt "$2" ]; do
+    unzip -qp "$ZIP" "$(printf '%s.%03d' "$1" $i)" || return 1
+    i=$((i + 1))
+  done
+}
+# Image name in the zip (slot b) -> partition of the active slot
+target() { echo "${1%_b}$SLOT"; }
+
+rm -rf $W
+mkdir -p $W
+unzip -qp "$ZIP" install.prop > $W/install.prop || abort "нет install.prop в zip"
+unzip -qp "$ZIP" images.txt > $W/images.txt || abort "нет images.txt в zip"
+VERSION=$(grep '^version=' $W/install.prop | cut -d= -f2)
+SUPER_SIZE=$(grep '^super_size=' $W/install.prop | cut -d= -f2)
+
+ui_print "==============================================="
+ui_print " LineageOS $VERSION для BALMUDA Phone"
+ui_print "==============================================="
+
+# --- 1. Checks (before any write) ---
+SLOT=$(getprop ro.boot.slot_suffix)
+case "$SLOT" in
+  _a) SLOTNUM=0 ;;
+  _b) SLOTNUM=1 ;;
+  *) abort "не удалось определить активный слот (ro.boot.slot_suffix='$SLOT')" ;;
+esac
+GROUP=qti_dynamic_partitions$SLOT
+ui_print "Установка в активный слот $SLOT"
+
+# The model is not checked via ro.product.device: TWRP is shared by all BALMUDA Phones and always reports
+# the code name. A different phone is rejected by the super size check below.
+SUPER=$(readlink -f /dev/block/by-name/super)
+[ -b "$SUPER" ] || abort "нет раздела super"
+SZ=$(blockdev --getsize64 "$SUPER")
+[ "$SZ" = "$SUPER_SIZE" ] || abort "размер super $SZ, ожидается $SUPER_SIZE — это не BALMUDA Phone?"
+for p in boot$SLOT dtbo$SLOT vbmeta$SLOT vbmeta_system$SLOT userdata metadata; do
+  [ -b /dev/block/by-name/$p ] || abort "нет раздела $p"
+done
+command -v lptools >/dev/null && command -v lpdump >/dev/null || abort "в этом recovery нет lptools/lpdump — нужен TWRP для BALMUDA Phone"
+
+# What is in system of the active slot now: LineageOS -> update, data kept
+KEEP_DATA=0
+mkdir -p $W/sys
+if [ -b /dev/block/mapper/system$SLOT ] && mount -o ro /dev/block/mapper/system$SLOT $W/sys 2>/dev/null; then
+  # Lineage 24 keeps ro.lineage.version in product/etc/build.prop; ro.lineage.device is in system/build.prop
+  OLD=$(grep -m1 '^ro.lineage.device=' $W/sys/system/build.prop 2>/dev/null | cut -d= -f2)
+  umount $W/sys
+  if [ -n "$OLD" ]; then
+    KEEP_DATA=1
+    ui_print "Сейчас установлена LineageOS — обновление, данные сохраняются."
+  fi
+fi
+# First install: the zip may wipe data itself only if it is NOT on /data, otherwise the next zips in the
+# TWRP queue (GApps, Magisk) would be wiped too. In that case Format Data is required at the end.
+NEED_FORMAT=0
+if [ "$KEEP_DATA" != 1 ]; then
+  case "$(readlink -f "$ZIP" 2>/dev/null || echo "$ZIP")" in
+    /data/*|/sdcard/*|/storage/*|/mnt/runtime/*) NEED_FORMAT=1
+      ui_print "Сейчас не LineageOS — первая установка. zip лежит во внутренней памяти:"
+      ui_print "данные НЕ стираются сейчас — в конце нужен Wipe -> Format Data." ;;
+    *) ui_print "Сейчас не LineageOS — первая установка: данные будут СТЁРТЫ." ;;
+  esac
+fi
+
+# zip integrity is not pre-verified here (use TWRP zip signature verification); every written
+# partition is still read back and compared against images.txt below.
+NEED=$(awk '$2 == "logical" {t += $3} END {printf "%.0f", t}' $W/images.txt)
+
+# Logical partitions in super for the active slot: name, group, size — from lpdump extents
+lpdump --slot=$SLOTNUM > $W/lpdump.txt 2>&1 || abort "lpdump не прочитал super"
+awk '/^  Name:/ {n=$2} / linear / {s[n] += $3 - $1 + 1} /^  Group:/ {g[n]=$2}
+     END {for (k in g) printf "%s %s %.0f\n", k, g[k], s[k] * 512}' $W/lpdump.txt > $W/parts.txt
+grep -q "^system$SLOT $GROUP " $W/parts.txt || abort "в super нет system$SLOT в группе $GROUP — неожиданная разметка, установка прервана"
+HAVE=$(awk -v g=$GROUP '$2 == g {t += $3} END {printf "%.0f", t}' $W/parts.txt)
+FREE=$(lptools free 2>/dev/null | sed -n 's/^Free space: //p')
+[ -n "$FREE" ] || abort "lptools free не ответил"
+COW=$(awk '$2 == "cow" {t += $3} END {printf "%.0f", t}' $W/parts.txt)
+ui_print "Нужно в группе $GROUP: $NEED Б; занято сейчас: $HAVE Б; свободно: $FREE Б (+cow $COW Б)"
+ge "$(awk -v h="$HAVE" -v f="$FREE" -v c="$COW" 'BEGIN {printf "%.0f", h + f + c}')" "$NEED" ||
+  abort "не хватает места в super"
+
+# --- 1b. Update: back up addons (addon.d — GApps, Magisk, ...) from the current system ---
+# backuptool.sh/.functions are LineageOS's own (vendor/lineage/prebuilt/common/bin) in "A-only" mode:
+# the same slot is rewritten, so backup before writing and restore after. Play services that TWRP
+# (GMS fix) moved from the APEX into /product/priv-app are saved separately: MindTheGapps' addon.d
+# list does not include them.
+ADDON=0
+GMSBK=/tmp/balmuda-gms-backup
+# backuptool does not mount product/system_ext itself when they are symlinks in system (as here), and it
+# checks the version via /product/etc/build.prop ("Incompatible ROM version" -> nothing saved). Mount them.
+mount_pe() {
+  for p in product system_ext; do
+    umount /$p 2>/dev/null; mkdir -p /$p
+    blockdev --setrw /dev/block/mapper/$p$SLOT 2>/dev/null
+    mount -o rw /dev/block/mapper/$p$SLOT /$p 2>/dev/null || ui_print "  (не смонтирован /$p)"
+  done
+}
+umount_pe() { for p in product system_ext; do umount /$p 2>/dev/null; done; }
+if [ "$KEEP_DATA" = 1 ]; then
+  mkdir -p /tmp/install/bin
+  unzip -o -q "$ZIP" backuptool.sh backuptool.functions -d /tmp/install/bin && chmod 755 /tmp/install/bin/backuptool.sh
+  for p in system system_ext product; do blockdev --setrw /dev/block/mapper/$p$SLOT 2>/dev/null; done
+  for m in /system_root /system /system_ext /product /mnt/system; do umount $m 2>/dev/null; done
+  if [ -x /tmp/install/bin/backuptool.sh ]; then
+    ui_print "Сохранение дополнений (addon.d)..."
+    mount_pe
+    sh /tmp/install/bin/backuptool.sh backup /dev/block/mapper/system$SLOT ext4 >> /tmp/recovery.log 2>&1 && ADDON=1
+    umount_pe
+    [ -d /tmp/backupdir ] && ui_print "  сохранено: $(du -sm /tmp/backupdir | cut -f1) МБ" || ui_print "  (addon.d: нечего сохранять)"
+  fi
+  rm -rf $GMSBK; mkdir -p $W/pr
+  if mount -o ro /dev/block/mapper/product$SLOT $W/pr 2>/dev/null; then
+    if ls -d $W/pr/priv-app/PrebuiltGmsCore* >/dev/null 2>&1; then
+      mkdir -p $GMSBK/priv-app $GMSBK/etc/permissions $GMSBK/etc/sysconfig
+      cp -a $W/pr/priv-app/PrebuiltGmsCore* $GMSBK/priv-app/
+      cp -a $W/pr/etc/permissions/privapp_allowlist_com.google.android.gmssystem.xml $GMSBK/etc/permissions/ 2>/dev/null
+      cp -a $W/pr/etc/sysconfig/preinstalled_packages_com.google.android.gmssystem.xml $GMSBK/etc/sysconfig/ 2>/dev/null
+      ui_print "  Play services (GMS fix) сохранены"
+    fi
+    umount $W/pr
+  fi
+fi
+
+# --- 2. Rebuild the active slot's partitions in super ---
+ui_print " "
+ui_print "Запись. Не перезагружайте телефон до конца установки!"
+for m in /system_root /system /system_ext /product /vendor /odm /mnt/system; do umount $m 2>/dev/null; done
+awk -v g=$GROUP '$2 == g || $2 == "cow" {print $1}' $W/parts.txt > $W/existing.txt
+# Logical partitions this zip provides, already renamed to the active slot
+awk '$2 == "logical" {print $1}' $W/images.txt | while read -r n; do target "$n"; done > $W/wanted.txt
+while read -r p; do
+  lptools unmap "$p" >/dev/null 2>&1 || fail_after_write "не удалось отключить $p (смонтирован?)"
+done < $W/existing.txt
+while read -r p; do
+  if grep -qx "$p" $W/wanted.txt; then
+    lptools resize "$p" 0 >/dev/null 2>&1 || fail_after_write "lptools resize $p 0"
+  else
+    ui_print "  удаляю $p"
+    lptools remove "$p" >/dev/null 2>&1 || fail_after_write "lptools remove $p"
+  fi
+done < $W/existing.txt
+while read -r name kind size sha chunks; do
+  [ "$kind" = logical ] || continue
+  part=$(target "$name")
+  if grep -qx "$part" $W/existing.txt; then
+    lptools resize "$part" "$size" >/dev/null 2>&1 || fail_after_write "lptools resize $part $size"
+    lptools map "$part" >/dev/null 2>&1 || fail_after_write "lptools map $part"
+  else
+    lptools create "$part" "$size" >/dev/null 2>&1 || fail_after_write "lptools create $part $size"
+  fi
+done < $W/images.txt
+
+# --- 3. Write images and read back what was written ---
+while read -r name kind size sha chunks; do
+  case "$name" in ''|'#'*) continue ;; esac
+  part=$(target "$name")
+  if [ "$kind" = logical ]; then dev=/dev/block/mapper/$part; else dev=/dev/block/by-name/$part; fi
+  i=0
+  while [ ! -b "$dev" ] && [ $i -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
+  [ -b "$dev" ] || fail_after_write "нет устройства $dev"
+  ge "$(blockdev --getsize64 "$dev")" "$size" || fail_after_write "$dev меньше образа $name"
+  ui_print "  $part ($size Б)..."
+  stream "$name" "$chunks" | dd of="$dev" bs=1048576 2>/dev/null || fail_after_write "запись $part"
+  sync
+  got=$(head -c "$size" "$dev" | sha256sum | cut -d' ' -f1)
+  [ "$got" = "$sha" ] || fail_after_write "проверка записанного $part: sha256 не совпал (повреждён zip или сбой записи)"
+done < $W/images.txt
+
+# --- 3b. Update: restore addons into the new system ---
+if [ "$ADDON" = 1 ]; then
+  ui_print "Восстановление дополнений (addon.d)..."
+  for p in system system_ext product; do blockdev --setrw /dev/block/mapper/$p$SLOT 2>/dev/null; done
+  mount_pe
+  sh /tmp/install/bin/backuptool.sh restore /dev/block/mapper/system$SLOT ext4 >> /tmp/recovery.log 2>&1 ||
+    ui_print "  (восстановление addon.d с ошибкой — поставьте GApps заново)"
+  umount_pe
+fi
+if [ -d $GMSBK/priv-app ]; then
+  mkdir -p $W/pr
+  if mount -o rw /dev/block/mapper/product$SLOT $W/pr 2>/dev/null; then
+    rm -f $W/pr/apex/com.google.android.gmssystem*.apex
+    mkdir -p $W/pr/priv-app $W/pr/etc/permissions $W/pr/etc/sysconfig
+    cp -a $GMSBK/priv-app/* $W/pr/priv-app/ && cp -a $GMSBK/etc/permissions/* $W/pr/etc/permissions/ 2>/dev/null
+    cp -a $GMSBK/etc/sysconfig/* $W/pr/etc/sysconfig/ 2>/dev/null
+    sync; umount $W/pr
+    ui_print "  Play services восстановлены"
+  else
+    ui_print "  (не удалось вернуть Play services — поставьте GApps заново)"
+  fi
+  rm -rf $GMSBK
+fi
+
+# --- 4. Keep the active slot active and "successful", otherwise ABL may switch slots after failed boots ---
+bootctl set-active-boot-slot $SLOTNUM >/dev/null 2>&1 || ui_print "  (bootctl set-active-boot-slot не сработал)"
+bootctl mark-boot-successful >/dev/null 2>&1 || ui_print "  (bootctl mark-boot-successful не сработал)"
+
+# --- 5. Data ---
+MD=/dev/block/by-name/metadata
+if [ "$KEEP_DATA" = 1 ]; then
+  ui_print "Данные сохранены."
+elif [ "$NEED_FORMAT" = 1 ]; then
+  ui_print "Данные не тронуты (будет Format Data)."
+else
+  ui_print "Стирание данных (userdata, metadata)..."
+  for m in /sdcard /data /metadata; do umount $m 2>/dev/null || umount -l $m 2>/dev/null; done
+  dd if=/dev/zero of=/dev/block/by-name/userdata bs=1048576 count=16 2>/dev/null || fail_after_write "стирание userdata"
+  dd if=/dev/zero of=$MD bs=1048576 count=16 2>/dev/null
+  mke2fs -F -q -t ext4 -b 4096 $MD >/dev/null 2>&1 || ui_print "  (mke2fs metadata не удался — система отформатирует сама)"
+fi
+sync
+
+ui_print " "
+ui_print "Готово. Теперь можно сразу установить GApps / Magisk."
+if [ "$NEED_FORMAT" = 1 ]; then
+  ui_print " "
+  ui_print "!!! ПЕРВАЯ УСТАНОВКА: после GApps/Magisk обязательно"
+  ui_print "!!! Wipe -> Format Data (ввести yes), и только потом"
+  ui_print "!!! Перезагрузка -> Система. Без этого LineageOS не загрузится."
+else
+  ui_print "Затем Перезагрузка -> Система. Первая загрузка — до нескольких минут."
+  [ "$KEEP_DATA" = 1 ] || ui_print "Ошибки монтирования /data в TWRP после стирания — это нормально."
+fi
+exit 0

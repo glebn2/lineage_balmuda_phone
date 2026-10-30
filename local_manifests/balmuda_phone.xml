@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <remote name="balmuda" fetch="https://github.com/glebn2" />
+
+  <project path="device/balmuda/A101BM" name="android_device_balmuda_A101BM" remote="balmuda" revision="lineage-24.0" />
+  <project path="vendor/balmuda" name="proprietary_vendor_balmuda" remote="balmuda" revision="lineage-24.0" />
+
+  <!-- The stock vibrator HAL from vendor blobs installs to the same paths -->
+  <remove-project name="LineageOS/android_vendor_qcom_opensource_vibrator" />
+
+  <!-- UAPI headers only, the kernel itself is the stock prebuilt -->
+  <project path="kernel/balmuda/A101BM" name="LineageOS/android_kernel_motorola_sm7250" remote="github"
+           revision="c9ddc8407e787d61426a7040010b1c2ebb21f41f" upstream="lineage-22.2" clone-depth="1" />
+</manifest>
