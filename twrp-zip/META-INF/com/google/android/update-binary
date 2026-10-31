@@ -55,7 +55,6 @@ case "$SLOT" in
   _b) SLOTNUM=1 ;;
   *) abort "не удалось определить активный слот (ro.boot.slot_suffix='$SLOT')" ;;
 esac
-GROUP=qti_dynamic_partitions$SLOT
 ui_print "Установка в активный слот $SLOT"
 
 # The model is not checked via ro.product.device: TWRP is shared by all BALMUDA Phones and always reports
@@ -68,6 +67,38 @@ for p in boot$SLOT dtbo$SLOT vbmeta$SLOT vbmeta_system$SLOT userdata metadata; d
   [ -b /dev/block/by-name/$p ] || abort "нет раздела $p"
 done
 command -v lptools >/dev/null && command -v lpdump >/dev/null || abort "в этом recovery нет lptools/lpdump — нужен TWRP для BALMUDA Phone"
+
+# Locked bootloader (AVB yellow/green): ABL boots only images signed with the enrolled AVB key, and dm-verity
+# rejects any change to system/product after signing. So: the zip's vbmeta must carry the same key as the
+# vbmeta now on the phone, and nothing may be added to system afterwards (addon.d / GApps zip / Magisk).
+# TWRP leaves ro.boot.flash.locked empty here; the real signals are device_state and verifiedbootstate.
+LOCKED=0
+[ "$(getprop ro.boot.vbmeta.device_state)" = locked ] && LOCKED=1
+case "$(getprop ro.boot.verifiedbootstate)" in green|yellow) LOCKED=1 ;; esac
+# sha256 of the AVB public key in a vbmeta image. Header fields are big-endian u64; the low 32 bits
+# (auth block size @16, public key offset @68, size @76) are enough for these small values.
+u32() { od -An -tu1 -j "$2" -N 4 "$1" | awk '{for (i = 1; i <= NF; i++) v = v * 256 + $i} END {printf "%.0f", v}'; }
+avbkey() {
+  [ "$(head -c 4 "$1")" = AVB0 ] || return 1
+  a=$(u32 "$1" 16); o=$(u32 "$1" 68); n=$(u32 "$1" 76)
+  [ "$n" -gt 0 ] 2>/dev/null || return 1
+  dd if="$1" bs=1 skip=$((256 + a + o)) count="$n" 2>/dev/null | sha256sum | cut -d' ' -f1
+}
+if [ "$LOCKED" = 1 ]; then
+  ui_print "Загрузчик заблокирован (AVB $(getprop ro.boot.verifiedbootstate))."
+  head -c 65536 /dev/block/by-name/vbmeta$SLOT > $W/vbmeta.cur
+  unzip -qp "$ZIP" vbmeta_b.000 > $W/vbmeta.new
+  CURKEY=$(avbkey $W/vbmeta.cur) || abort "не удалось прочитать ключ AVB с телефона"
+  NEWKEY=$(avbkey $W/vbmeta.new) || abort "в zip нет подписанного vbmeta"
+  [ "$CURKEY" = "$NEWKEY" ] || abort "zip подписан другим ключом AVB, с заблокированным загрузчиком телефон не загрузится. Нужна сборка, подписанная вашим ключом, или разблокированный загрузчик."
+  ui_print "  ключ AVB совпадает: ${NEWKEY%${NEWKEY#????????????????}}..."
+  mkdir -p $W/sys
+  if mount -o ro /dev/block/mapper/system$SLOT $W/sys 2>/dev/null; then
+    EXTRA=$(ls $W/sys/system/addon.d/*.sh 2>/dev/null | grep -v '/50-lineage.sh$')
+    umount $W/sys
+    [ -z "$EXTRA" ] || abort "в системе дополнения из zip (addon.d: $(echo $EXTRA | sed 's|[^ ]*/||g')). С заблокированным загрузчиком их нельзя перенести: изменённый system не пройдёт проверку. Нужна сборка с ними внутри или разблокированный загрузчик."
+  fi
+fi
 
 # What is in system of the active slot now: LineageOS -> update, data kept
 KEEP_DATA=0
@@ -101,8 +132,37 @@ NEED=$(awk '$2 == "logical" {t += $3} END {printf "%.0f", t}' $W/images.txt)
 lpdump --slot=$SLOTNUM > $W/lpdump.txt 2>&1 || abort "lpdump не прочитал super"
 awk '/^  Name:/ {n=$2} / linear / {s[n] += $3 - $1 + 1} /^  Group:/ {g[n]=$2}
      END {for (k in g) printf "%s %s %.0f\n", k, g[k], s[k] * 512}' $W/lpdump.txt > $W/parts.txt
-grep -q "^system$SLOT $GROUP " $W/parts.txt || abort "в super нет system$SLOT в группе $GROUP — неожиданная разметка, установка прервана"
-HAVE=$(awk -v g=$GROUP '$2 == g {t += $3} END {printf "%.0f", t}' $W/parts.txt)
+# Both slots are supported. lptools writes one partition table to every metadata slot and puts new
+# partitions into the group that holds system$SLOT (else the largest group). After lptools/fastbootd ran on
+# the other slot, super may have no group for this slot at all (e.g. only qti_dynamic_partitions_b): then
+# system$SLOT is created empty in the existing group and the group limit is lifted, so both slots fit in
+# super side by side and the other slot keeps working.
+# A size-0 partition has no dm table: lptools then writes it to metadata but fails to map it and exits 1,
+# so the result is judged by lpdump, and a run interrupted halfway (system$SLOT present, limit not lifted)
+# is finished by the group check below.
+reparts() {
+  lpdump --slot=$SLOTNUM > $W/lpdump.txt 2>&1 || abort "lpdump не прочитал super"
+  awk '/^  Name:/ {n=$2} / linear / {s[n] += $3 - $1 + 1} /^  Group:/ {g[n]=$2}
+       END {for (k in g) printf "%s %s %.0f\n", k, g[k], s[k] * 512}' $W/lpdump.txt > $W/parts.txt
+}
+if ! grep -q "^system$SLOT " $W/parts.txt; then
+  ui_print "В super нет разделов слота $SLOT — создаю их рядом с другим слотом."
+  lptools create system$SLOT 0 >> /tmp/recovery.log 2>&1
+  reparts
+  grep -q "^system$SLOT " $W/parts.txt || abort "lptools create system$SLOT не сработал"
+fi
+GROUP=$(awk -v p=system$SLOT '$1 == p {print $2}' $W/parts.txt)
+[ -n "$GROUP" ] || abort "в super нет system$SLOT — неожиданная разметка, установка прервана"
+# The group also holds the other slot's partitions: lift its size limit so both slots fit
+if awk -v g=$GROUP -v s=$SLOT '$2 == g && substr($1, length($1) - 1) != s {f = 1} END {exit !f}' $W/parts.txt &&
+   ! awk -v g=$GROUP '/^  Name:/ {n=$2} /^  Maximum size:/ && n == g {exit $3 != 0}' $W/lpdump.txt; then
+  ui_print "Группа $GROUP общая с другим слотом — снимаю лимит её размера."
+  lptools unlimited-group >> /tmp/recovery.log 2>&1 || abort "lptools unlimited-group"
+  reparts
+fi
+ui_print "Группа разделов слота $SLOT: $GROUP"
+# Only this slot's partitions count (and get rebuilt): the other slot may share the group
+HAVE=$(awk -v g=$GROUP -v s=$SLOT '$2 == g && substr($1, length($1) - 1) == s {t += $3} END {printf "%.0f", t}' $W/parts.txt)
 FREE=$(lptools free 2>/dev/null | sed -n 's/^Free space: //p')
 [ -n "$FREE" ] || abort "lptools free не ответил"
 COW=$(awk '$2 == "cow" {t += $3} END {printf "%.0f", t}' $W/parts.txt)
@@ -110,7 +170,7 @@ ui_print "Нужно в группе $GROUP: $NEED Б; занято сейчас
 ge "$(awk -v h="$HAVE" -v f="$FREE" -v c="$COW" 'BEGIN {printf "%.0f", h + f + c}')" "$NEED" ||
   abort "не хватает места в super"
 
-# --- 1b. Update: back up addons (addon.d — GApps, Magisk, ...) from the current system ---
+# --- 1b. Update: back up addons (addon.d — GApps, Magisk, ...) from the current system (unlocked only) ---
 # backuptool.sh/.functions are LineageOS's own (vendor/lineage/prebuilt/common/bin) in "A-only" mode:
 # the same slot is rewritten, so backup before writing and restore after. Play services that TWRP
 # (GMS fix) moved from the APEX into /product/priv-app are saved separately: MindTheGapps' addon.d
@@ -127,7 +187,7 @@ mount_pe() {
   done
 }
 umount_pe() { for p in product system_ext; do umount /$p 2>/dev/null; done; }
-if [ "$KEEP_DATA" = 1 ]; then
+if [ "$KEEP_DATA" = 1 ] && [ "$LOCKED" != 1 ]; then
   mkdir -p /tmp/install/bin
   unzip -o -q "$ZIP" backuptool.sh backuptool.functions -d /tmp/install/bin && chmod 755 /tmp/install/bin/backuptool.sh
   for p in system system_ext product; do blockdev --setrw /dev/block/mapper/$p$SLOT 2>/dev/null; done
@@ -156,7 +216,7 @@ fi
 ui_print " "
 ui_print "Запись. Не перезагружайте телефон до конца установки!"
 for m in /system_root /system /system_ext /product /vendor /odm /mnt/system; do umount $m 2>/dev/null; done
-awk -v g=$GROUP '$2 == g || $2 == "cow" {print $1}' $W/parts.txt > $W/existing.txt
+awk -v g=$GROUP -v s=$SLOT '($2 == g && substr($1, length($1) - 1) == s) || $2 == "cow" {print $1}' $W/parts.txt > $W/existing.txt
 # Logical partitions this zip provides, already renamed to the active slot
 awk '$2 == "logical" {print $1}' $W/images.txt | while read -r n; do target "$n"; done > $W/wanted.txt
 while read -r p; do
@@ -241,7 +301,12 @@ fi
 sync
 
 ui_print " "
-ui_print "Готово. Теперь можно сразу установить GApps / Magisk."
+if [ "$LOCKED" = 1 ]; then
+  ui_print "Готово. Загрузчик заблокирован: НЕ устанавливайте после этого"
+  ui_print "GApps / Magisk / другие zip — система не загрузится."
+else
+  ui_print "Готово. Теперь можно сразу установить GApps / Magisk."
+fi
 if [ "$NEED_FORMAT" = 1 ]; then
   ui_print " "
   ui_print "!!! ПЕРВАЯ УСТАНОВКА: после GApps/Magisk обязательно"
