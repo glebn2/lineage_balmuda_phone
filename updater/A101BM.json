@@ -1,0 +1,18 @@
+[
+  {
+    "datetime": 1793563974,
+    "files": [
+      {
+        "filename": "lineage-24.0-test6-UNOFFICIAL-BALMUDA_Phone-OTA.zip",
+        "os_patch_level": "2026-10-01",
+        "os_sdk_level": "37",
+        "ota_property_files": "payload_metadata.bin:4391:124229,payload.bin:4391:1145318141,payload_properties.txt:1145322590:156,apex_info.pb:1966:1414,care_map.pb:3427:917,metadata:69:676,metadata.pb:813:1105",
+        "sha256": "69d808bebb208f4e7983bc58882737f220cea7415c75e6ae667ac051644a9ae2",
+        "size": 1145325657,
+        "url": "https://github.com/glebn2/lineage_balmuda_phone/releases/download/24.0-test6/lineage-24.0-test6-UNOFFICIAL-BALMUDA_Phone-OTA.zip"
+      }
+    ],
+    "type": "UNOFFICIAL",
+    "version": "24.0"
+  }
+]
