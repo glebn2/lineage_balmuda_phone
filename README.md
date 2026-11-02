@@ -6,6 +6,33 @@ codename is `A101BM`.
 Builds, TWRP and discussion (Russian): [4PDA thread](https://4pda.to/forum/index.php?showtopic=1068017),
 [downloads](https://4pda.to/forum/index.php?showtopic=1068017&view=findpost&p=145680258).
 
+## Install
+
+Downloads: [Releases](https://github.com/glebn2/lineage_balmuda_phone/releases). Take the
+`…-TWRP.zip`; the `…-OTA.zip` is for the built-in Updater only and cannot be installed from TWRP.
+TWRP image: [twrp_device_balmuda_A101BM releases](https://github.com/glebn2/twrp_device_balmuda_A101BM/releases).
+
+1. Unlock the bootloader.
+2. Flash TWRP to both recovery partitions, so it stays available whichever slot is active
+   (updates switch slots):
+
+   ```bash
+   fastboot flash recovery_a TWRP-3.7.1_12-BALMUDA_Phone-<date>.img
+   fastboot flash recovery_b TWRP-3.7.1_12-BALMUDA_Phone-<date>.img
+   fastboot reboot recovery
+   ```
+
+3. In TWRP: Install → the `…-TWRP.zip`. It writes the active slot; the other slot keeps stock
+   until the first update.
+4. First install over stock wipes data:
+   - zip copied to internal storage: after the zip (and GApps, if any) do Wipe → Format Data, type
+     `yes`, then reboot;
+   - zip from `adb sideload` or USB-OTG: the zip wipes data itself.
+5. Reboot → System.
+
+Updates: Settings → System → System updates (A/B, installs into the other slot, data kept, TWRP stays).
+A newer `…-TWRP.zip` can also be installed from TWRP over LineageOS; data is kept.
+
 ## Repositories
 
 | Path | Repository |
@@ -57,7 +84,6 @@ Signed release:
   checks of Android 17 non-fatal on 4.19.
 - The boot image keeps the stock header version (11.0.0 / 2023-09) so TWRP can decrypt `/data`.
 - SELinux is permissive; vbmeta verification is disabled.
-- Install from TWRP; the zip writes the active slot.
 
 ## License
 
