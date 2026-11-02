@@ -282,8 +282,8 @@ if [ -d $GMSBK/priv-app ]; then
 fi
 
 # --- 4. Keep the active slot active and "successful", otherwise ABL may switch slots after failed boots ---
-bootctl set-active-boot-slot $SLOTNUM >/dev/null 2>&1 || ui_print "  (bootctl set-active-boot-slot не сработал)"
-bootctl mark-boot-successful >/dev/null 2>&1 || ui_print "  (bootctl mark-boot-successful не сработал)"
+bootctl set-active-boot-slot $SLOTNUM >> /tmp/recovery.log 2>&1 || ui_print "  (bootctl set-active-boot-slot не сработал: $(bootctl set-active-boot-slot $SLOTNUM 2>&1 | head -n 1))"
+bootctl mark-boot-successful >> /tmp/recovery.log 2>&1 || ui_print "  (bootctl mark-boot-successful не сработал: $(bootctl mark-boot-successful 2>&1 | head -n 1))"
 
 # --- 5. Data ---
 MD=/dev/block/by-name/metadata
