@@ -1,5 +1,7 @@
 # LineageOS 24.0 for BALMUDA Phone (unofficial)
 
+**English** | [Русский](#русский)
+
 Unofficial LineageOS 24.0 (Android 17) for BALMUDA Phone. One image for A101BM and X01A; the device
 codename is `A101BM`.
 
@@ -12,7 +14,7 @@ Downloads: [Releases](https://github.com/glebn2/lineage_balmuda_phone/releases).
 `…-TWRP.zip`; the `…-OTA.zip` is for the built-in Updater only and cannot be installed from TWRP.
 TWRP image: [twrp_device_balmuda_A101BM releases](https://github.com/glebn2/twrp_device_balmuda_A101BM/releases).
 
-1. Unlock the bootloader.
+1. Unlock the bootloader. One-button tool: [balmunlock](https://github.com/glebn2/balmunlock).
 2. Flash TWRP to both recovery partitions, so it stays available whichever slot is active
    (updates switch slots):
 
@@ -93,3 +95,73 @@ Signed release:
 
 Apache-2.0. `gps/` in the device tree keeps its own license headers. Proprietary files belong to
 their respective owners.
+
+---
+
+## Русский
+
+Неофициальная LineageOS 24.0 (Android 17) для BALMUDA Phone. Один образ для A101BM и X01A,
+кодовое имя устройства — `A101BM`.
+
+Сборки, TWRP и обсуждение: [тема на 4PDA](https://4pda.to/forum/index.php?showtopic=1068017),
+[загрузки](https://4pda.to/forum/index.php?showtopic=1068017&view=findpost&p=145680258).
+
+### Установка
+
+Загрузки: [Releases](https://github.com/glebn2/lineage_balmuda_phone/releases). Нужен
+`…-TWRP.zip`; `…-OTA.zip` — только для встроенного обновления, из TWRP он не ставится.
+Образ TWRP: [релизы twrp_device_balmuda_A101BM](https://github.com/glebn2/twrp_device_balmuda_A101BM/releases).
+
+1. Разблокировать загрузчик. Утилита разблокировки в одну кнопку: [balmunlock](https://github.com/glebn2/balmunlock).
+2. Прошить TWRP в оба раздела recovery, чтобы он оставался доступен при любом активном слоте
+   (обновления переключают слоты):
+
+   ```bash
+   fastboot flash recovery_a TWRP-3.7.1_12-BALMUDA_Phone-<дата>.img
+   fastboot flash recovery_b TWRP-3.7.1_12-BALMUDA_Phone-<дата>.img
+   fastboot reboot recovery
+   ```
+
+3. В TWRP: Install → `…-TWRP.zip`. Пишется активный слот, второй остаётся стоковым до первого
+   обновления.
+4. Первая установка поверх стока стирает данные:
+   - zip во внутренней памяти — после него (и GApps, если нужны) Wipe → Format Data, ввести `yes`,
+     затем перезагрузка;
+   - zip через `adb sideload` или USB-OTG — данные стирает сам zip.
+5. Reboot → System.
+
+Обновления: Настройки → Система → Обновления системы (A/B, ставятся во второй слот, данные и TWRP
+сохраняются). Новый `…-TWRP.zip` тоже можно поставить из TWRP поверх LineageOS без потери данных.
+
+GApps и Magisk переживают обновление по воздуху начиная с 24.0-test6: сборка сохраняет Play services,
+которые TWRP перенёс из APEX MindTheGapps. Если после обновления Play services всё же падают:
+TWRP → Install → MindTheGapps → Reboot → System.
+
+### Репозитории
+
+| Путь | Репозиторий |
+|---|---|
+| `device/balmuda/A101BM` | [android_device_balmuda_A101BM](https://github.com/glebn2/android_device_balmuda_A101BM) |
+| `vendor/balmuda` | [proprietary_vendor_balmuda](https://github.com/glebn2/proprietary_vendor_balmuda) |
+| `kernel/balmuda/A101BM` | [LineageOS/android_kernel_motorola_sm7250](https://github.com/LineageOS/android_kernel_motorola_sm7250), только заголовки UAPI |
+
+В этом репозитории — локальный манифест, скрипты сборки и подписи, установщик для TWRP.
+TWRP для BALMUDA Phone: [twrp_device_balmuda_A101BM](https://github.com/glebn2/twrp_device_balmuda_A101BM).
+
+### Сборка
+
+Подготовить окружение по вики LineageOS, затем выполнить команды из раздела [Build](#build).
+`build.sh` сначала применяет `device/balmuda/A101BM/patches`; перед `repo sync` их нужно откатить
+(`device/balmuda/A101BM/patches/apply-patches.sh --revert`).
+
+### Примечания
+
+- Штатное ядро Kyocera 4.19, DTB, DTBO и модули. Патчи делают проверки BPF и версии ядра в Android 17
+  нефатальными на 4.19.
+- В заголовке boot-образа сохранена стоковая версия (11.0.0 / 2023-09), чтобы TWRP расшифровывал `/data`.
+- SELinux в режиме permissive, проверка vbmeta отключена.
+
+### Лицензия
+
+Apache-2.0. `gps/` в дереве устройства сохраняет собственные заголовки лицензий. Проприетарные файлы
+принадлежат их правообладателям.
