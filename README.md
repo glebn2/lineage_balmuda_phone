@@ -33,6 +33,10 @@ TWRP image: [twrp_device_balmuda_A101BM releases](https://github.com/glebn2/twrp
 Updates: Settings → System → System updates (A/B, installs into the other slot, data kept, TWRP stays).
 A newer `…-TWRP.zip` can also be installed from TWRP over LineageOS; data is kept.
 
+With GApps installed, update with the `…-TWRP.zip` for now: after an OTA update Play services lose
+their system copy and crash. If that already happened: TWRP → Install → MindTheGapps → Reboot →
+System. Magisk survives OTA updates.
+
 ## Repositories
 
 | Path | Repository |
